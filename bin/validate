@@ -1,0 +1,81 @@
+#!/usr/bin/env node
+
+const { program } = require('commander');
+const { parseInt } = require('../src/argParser');
+
+program
+  .name('validate')
+  .option('--optimize', 'enable bytecode optimizer', true)
+  .option('--optimize-runs <optimize-runs>', 'number of optimizer runs', 4294967295, parseInt)
+  .option('--evm-version <evm-version>', 'evm version', 'constantinople')
+  .requiredOption(
+    '--solc-version <solc-version>',
+    'solidity compiler solc version',
+    'v0.8.10+commit.fc410830',
+  )
+  .requiredOption(
+    '--contract-address <contract-address>',
+    'address of the contract to be verified',
+    '0x8888888888885b073f3c81258c27e83db228d5f3',
+  )
+  .requiredOption('--source <source-path>', 'path to the sourcecode (flattened)')
+  .option('--constructor-args <args>', 'comma-separated list of constructor args')
+  .parse(process.argv);
+
+const {
+  optimize,
+  optimizeRuns,
+  evmVersion,
+  solcVersion,
+  contractAddress,
+  source,
+  constructorArgs,
+} = program.opts();
+
+const fs = require('fs').promises;
+const VM = require('ethereumjs-vm').default;
+const BN = require('bn.js');
+const web3 = require('../src/web3');
+
+const solc = require('../src/solc');
+const getDeployedBytecode = require('../src/getDeployedBytecode');
+
+const stripBytecode = (bc) => bc.substr(0, bc.length - 86);
+
+(async () => {
+  const expectedBytecode = await getDeployedBytecode(contractAddress);
+
+  const { name, constructorABI, bytecode } = await solc({
+    optimize,
+    optimizeRuns,
+    evmVersion,
+    version: solcVersion,
+    source: (await fs.readFile(source)).toString(),
+  });
+  console.log('validating contract', name, 'deployed on', contractAddress);
+
+  const args = (constructorArgs ?? '').split(',');
+
+  if (constructorABI.length !== args.length) {
+    console.error('constructor args are required for args:', constructorABI);
+    process.exit(1);
+  }
+
+  let encodedArgs = '';
+  if (constructorABI.length > 0) {
+    encodedArgs = web3.eth.abi.encodeParameters(constructorABI, args).substr(2);
+  }
+
+  const vm = new VM();
+  const { returnValue: actualBytecodeBuffer } = await vm.runCode({
+    address: Buffer.from(contractAddress.substr(2), 'hex'),
+    code: Buffer.from(bytecode + encodedArgs, 'hex'),
+    gasLimit: new BN('85000000'),
+  });
+  const actualBytecode = actualBytecodeBuffer.toString('hex');
+
+  console.log(
+    'validation status:',
+    stripBytecode(expectedBytecode) === stripBytecode(actualBytecode),
+  );
+})();
